@@ -1,0 +1,275 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-platform-config
+  namespace: order-processing
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+  AUTH_TOKEN: local-dev-token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: order-processing
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: order-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: app
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "order_platform.services.api_gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: api-gateway
+            - name: API_GATEWAY_METRICS_PORT
+              value: "8001"
+          ports:
+            - containerPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: order-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.order_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: order-service
+            - name: ORDER_METRICS_PORT
+              value: "8010"
+          ports:
+            - containerPort: 8010
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: order-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.inventory_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: inventory-service
+            - name: INVENTORY_METRICS_PORT
+              value: "8020"
+          ports:
+            - containerPort: 8020
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: order-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.payment_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: payment-service
+            - name: PAYMENT_METRICS_PORT
+              value: "8030"
+          ports:
+            - containerPort: 8030
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-service
+  namespace: order-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shipping-service
+  template:
+    metadata:
+      labels:
+        app: shipping-service
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.shipping_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: shipping-service
+            - name: SHIPPING_METRICS_PORT
+              value: "8040"
+          ports:
+            - containerPort: 8040
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saga-orchestrator
+  namespace: order-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saga-orchestrator
+  template:
+    metadata:
+      labels:
+        app: saga-orchestrator
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.saga_orchestrator.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: saga-orchestrator
+            - name: SAGA_METRICS_PORT
+              value: "8050"
+          ports:
+            - containerPort: 8050
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dlq-monitor
+  namespace: order-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dlq-monitor
+  template:
+    metadata:
+      labels:
+        app: dlq-monitor
+    spec:
+      containers:
+        - name: worker
+          image: order-platform:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "order_platform.services.dlq_monitor.worker"]
+          envFrom:
+            - configMapRef:
+                name: order-platform-config
+          env:
+            - name: SERVICE_NAME
+              value: dlq-monitor
+            - name: DLQ_METRICS_PORT
+              value: "8060"
+          ports:
+            - containerPort: 8060
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: inventory-service-kafka-lag
+  namespace: order-processing
+spec:
+  scaleTargetRef:
+    name: inventory-service
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: inventory-service
+        topic: order.accepted
+        lagThreshold: "500"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payment-service-kafka-lag
+  namespace: order-processing
+spec:
+  scaleTargetRef:
+    name: payment-service
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: payment-service
+        topic: inventory.reserved
+        lagThreshold: "500"

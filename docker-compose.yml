@@ -1,0 +1,202 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./order_platform/sql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders -d orders"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  topic-init:
+    image: bitnami/kafka:3.7
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      for topic in order.created order.accepted inventory.reserved payment.completed
+      payment.failed shipping.scheduled inventory.release.requested order.cancel.requested
+      inventory.released orders.dlq; do
+        /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --replication-factor 1 --partitions 3 --topic "$$topic";
+      done
+
+  api-gateway:
+    build: .
+    command: uvicorn order_platform.services.api_gateway.app:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      SERVICE_NAME: api-gateway
+      API_GATEWAY_METRICS_PORT: 8001
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  order-service:
+    build: .
+    command: python -m order_platform.services.order_service.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: order-service
+      ORDER_METRICS_PORT: 8010
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8010:8010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  inventory-service:
+    build: .
+    command: python -m order_platform.services.inventory_service.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: inventory-service
+      INVENTORY_METRICS_PORT: 8020
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8020:8020"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  payment-service:
+    build: .
+    command: python -m order_platform.services.payment_service.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: payment-service
+      PAYMENT_METRICS_PORT: 8030
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8030:8030"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  shipping-service:
+    build: .
+    command: python -m order_platform.services.shipping_service.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: shipping-service
+      SHIPPING_METRICS_PORT: 8040
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8040:8040"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  saga-orchestrator:
+    build: .
+    command: python -m order_platform.services.saga_orchestrator.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: saga-orchestrator
+      SAGA_METRICS_PORT: 8050
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8050:8050"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  dlq-monitor:
+    build: .
+    command: python -m order_platform.services.dlq_monitor.worker
+    env_file: .env
+    environment:
+      SERVICE_NAME: dlq-monitor
+      DLQ_METRICS_PORT: 8060
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+    ports:
+      - "8060:8060"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api-gateway
+      - order-service
+      - inventory-service
+      - payment-service
+      - shipping-service
+      - saga-orchestrator
+      - dlq-monitor
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  grafana-data:

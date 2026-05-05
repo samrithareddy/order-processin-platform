@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: order-platform
+    orgId: 1
+    folder: Order Platform
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

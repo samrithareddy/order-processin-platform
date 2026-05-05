@@ -1,0 +1,53 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: inventory-service-lag-scaler
+  namespace: order-processing
+spec:
+  scaleTargetRef:
+    name: inventory-service
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: inventory-service
+        topic: order.accepted
+        lagThreshold: "500"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payment-service-lag-scaler
+  namespace: order-processing
+spec:
+  scaleTargetRef:
+    name: payment-service
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: payment-service
+        topic: inventory.reserved
+        lagThreshold: "500"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: shipping-service-lag-scaler
+  namespace: order-processing
+spec:
+  scaleTargetRef:
+    name: shipping-service
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: shipping-service
+        topic: payment.completed
+        lagThreshold: "500"
